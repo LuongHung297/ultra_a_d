@@ -123,7 +123,7 @@ class AdmInterstitialAd(
                     isLoadingAd = false
                     mInterstitialAd = interstitialAd
                     mInterstitialAd?.fullScreenContentCallback = this@AdmInterstitialAd
-                    onAdLoaded?.invoke(mInterstitialAd)
+                    onAdLoaded?.invoke(interstitialAd)
                 }
 
                 override fun onAdFailedToLoad(loadAdError: LoadAdError) {
