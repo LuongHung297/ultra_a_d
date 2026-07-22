@@ -60,7 +60,7 @@ dependencies {
     //lifecycle + multidex
     implementation ("androidx.lifecycle:lifecycle-process:2.10.0")
     implementation ("com.github.eriffanani:ContentLoader:1.2.0")
-    implementation ("com.android.billingclient:billing:8.3.0")
+    implementation ("com.android.billingclient:billing:9.1.0")
     implementation ("com.google.guava:guava:33.6.0-jre")
 
     implementation("com.facebook.shimmer:shimmer:0.5.0@aar")
