@@ -12,6 +12,7 @@ import static com.android.billingclient.api.BillingClient.BillingResponseCode.SE
 import static com.android.billingclient.api.BillingClient.BillingResponseCode.SERVICE_UNAVAILABLE;
 import static com.android.billingclient.api.BillingClient.BillingResponseCode.USER_CANCELED;
 import static com.android.billingclient.api.BillingClient.FeatureType.SUBSCRIPTIONS;
+import static com.android.billingclient.api.BillingClient.OnPurchasesUpdatedSubResponseCode.NO_APPLICABLE_SUB_RESPONSE_CODE;
 import static com.android.billingclient.api.BillingClient.ProductType.INAPP;
 import static com.android.billingclient.api.BillingClient.ProductType.SUBS;
 
@@ -49,6 +50,7 @@ import com.google.common.collect.ImmutableList;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 public class BillingConnector {
@@ -70,6 +72,8 @@ public class BillingConnector {
     private List<String> subscriptionIds;
 
     private final List<QueryProductDetailsParams.Product> allProductList = new ArrayList<>();
+    private final List<String> allProductIds = new ArrayList<>();
+    private final AtomicInteger pendingProductDetailsQueries = new AtomicInteger(0);
 
     private final List<ProductInfo> fetchedProductInfoList = new ArrayList<>();
     private final List<PurchaseInfo> purchasedProductsList = new ArrayList<>();
@@ -79,7 +83,11 @@ public class BillingConnector {
     private boolean shouldEnableLogging = false;
 
     private boolean isConnected = false;
+    private boolean isConnecting = false;
     private boolean fetchedPurchasedProducts = false;
+
+    private final Handler uiHandler = new Handler(Looper.getMainLooper());
+    private final Runnable reconnectRunnable = this::connect;
 
     /**
      * BillingConnector public constructor
@@ -98,7 +106,16 @@ public class BillingConnector {
     private void init(Context context) {
         billingClient = BillingClient.newBuilder(context)
                 .enablePendingPurchases(PendingPurchasesParams.newBuilder().enableOneTimeProducts().build())
+                //enableAutoServiceReconnection() must not be used here: it makes BillingClient.isReady()
+                //always return true, so the connection state this class tracks would never be reliable
+                //and the product details query would be skipped. Reconnects are handled by retryBillingClientConnection()
                 .setListener((billingResult, purchases) -> {
+                    //Google Billing v9 reports why a purchase was rejected through a sub response code
+                    if (billingResult.getOnPurchasesUpdatedSubResponseCode() != NO_APPLICABLE_SUB_RESPONSE_CODE) {
+                        Log("Purchases updated sub response code: " + billingResult.getOnPurchasesUpdatedSubResponseCode()
+                                + " (1 = payment declined due to insufficient funds, 2 = user ineligible)");
+                    }
+
                     switch (billingResult.getResponseCode()) {
                         case OK:
                             if (purchases != null) {
@@ -279,6 +296,9 @@ public class BillingConnector {
             }
         }
 
+        //connect() is called again on every reconnect and before every purchase,
+        //so the cached list has to be rebuilt instead of appended to
+        allProductList.clear();
         allProductList.addAll(productInAppList);
         allProductList.addAll(productSubsList);
 
@@ -288,57 +308,85 @@ public class BillingConnector {
         }
 
         //check for duplicates product ids
-        int allIdsSize = allProductList.size();
-        int allIdsSizeDistinct = (int) allProductList.stream().distinct().count();
+        List<String> allIds = new ArrayList<>();
+        if (consumableIds != null) {
+            allIds.addAll(consumableIds);
+        }
+        if (nonConsumableIds != null) {
+            allIds.addAll(nonConsumableIds);
+        }
+        if (subscriptionIds != null) {
+            allIds.addAll(subscriptionIds);
+        }
+
+        int allIdsSize = allIds.size();
+        int allIdsSizeDistinct = (int) allIds.stream().distinct().count();
         if (allIdsSize != allIdsSizeDistinct) {
             throw new IllegalArgumentException("The product id must appear only once in a list. Also, it must not be in different lists");
         }
 
-        Log("Billing service: connecting...");
-        if (!billingClient.isReady()) {
-            billingClient.startConnection(new BillingClientStateListener() {
-                @Override
-                public void onBillingServiceDisconnected() {
-                    isConnected = false;
+        allProductIds.clear();
+        allProductIds.addAll(allIds);
 
-                    findUiHandler().post(() -> billingEventListener.onBillingError(BillingConnector.this, new BillingResponse(ErrorType.CLIENT_DISCONNECTED,
-                            "Billing service: disconnected", defaultResponseCode)));
+        if (billingClient.isReady()) {
+            if (!isConnected) {
+                isConnected = true;
+                Log("Billing service: already connected");
+            }
 
-                    Log("Billing service: Trying to reconnect...");
-                    retryBillingClientConnection();
-                }
-
-                @Override
-                public void onBillingSetupFinished(@NonNull BillingResult billingResult) {
-                    isConnected = false;
-
-                    switch (billingResult.getResponseCode()) {
-                        case OK:
-                            isConnected = true;
-                            Log("Billing service: connected");
-
-                            //query consumable and non-consumable product details
-                            if (!productInAppList.isEmpty()) {
-                                queryProductDetails(INAPP, productInAppList);
-                            }
-
-                            //query subscription product details
-                            if (subscriptionIds != null) {
-                                queryProductDetails(SUBS, productSubsList);
-                            }
-                            break;
-                        case BILLING_UNAVAILABLE:
-                            Log("Billing service: unavailable");
-                            retryBillingClientConnection();
-                            break;
-                        default:
-                            Log("Billing service: error");
-                            retryBillingClientConnection();
-                            break;
-                    }
-                }
-            });
+            //the product details query only runs from onBillingSetupFinished, so it has to run here
+            //as well, otherwise products stay missing whenever a previous query did not fetch them
+            queryMissingProductDetails(productInAppList, productSubsList);
+            return this;
         }
+
+        if (isConnecting) {
+            Log("Billing service: connection already in progress");
+            return this;
+        }
+
+        Log("Billing service: connecting...");
+        isConnecting = true;
+        billingClient.startConnection(new BillingClientStateListener() {
+            @Override
+            public void onBillingServiceDisconnected() {
+                isConnected = false;
+                isConnecting = false;
+
+                findUiHandler().post(() -> billingEventListener.onBillingError(BillingConnector.this, new BillingResponse(ErrorType.CLIENT_DISCONNECTED,
+                        "Billing service: disconnected", defaultResponseCode)));
+
+                Log("Billing service: Trying to reconnect...");
+                retryBillingClientConnection();
+            }
+
+            @Override
+            public void onBillingSetupFinished(@NonNull BillingResult billingResult) {
+                isConnected = false;
+                isConnecting = false;
+
+                switch (billingResult.getResponseCode()) {
+                    case OK:
+                        isConnected = true;
+                        //the backoff has to be reset, otherwise a later reconnect keeps the last (up to 15 minutes) delay
+                        reconnectMilliseconds = RECONNECT_TIMER_START_MILLISECONDS;
+                        Log("Billing service: connected");
+
+                        //query consumable, non-consumable and subscription product details
+                        queryMissingProductDetails(productInAppList, productSubsList);
+                        break;
+                    case BILLING_UNAVAILABLE:
+                        //since Google Billing v9 this is also returned when the Play Store app is blocked by the system
+                        Log("Billing service: unavailable -> " + billingResult.getDebugMessage());
+                        retryBillingClientConnection();
+                        break;
+                    default:
+                        Log("Billing service: error -> " + billingResult.getResponseCode() + " " + billingResult.getDebugMessage());
+                        retryBillingClientConnection();
+                        break;
+                }
+            }
+        });
 
         return this;
     }
@@ -348,8 +396,36 @@ public class BillingConnector {
      * Max out at the time specified by RECONNECT_TIMER_MAX_TIME_MILLISECONDS (15 minutes)
      */
     private void retryBillingClientConnection() {
-        findUiHandler().postDelayed(this::connect, reconnectMilliseconds);
+        //a single retry has to be pending at a time, otherwise every failed attempt stacks another one
+        findUiHandler().removeCallbacks(reconnectRunnable);
+        findUiHandler().postDelayed(reconnectRunnable, reconnectMilliseconds);
         reconnectMilliseconds = Math.min(reconnectMilliseconds * 2, RECONNECT_TIMER_MAX_TIME_MILLISECONDS);
+    }
+
+    /**
+     * Fires a query in Play Console for every product that has not been fetched yet
+     * <p>
+     * Called on every successful connection, so it must not re-query products already in the cache
+     */
+    private void queryMissingProductDetails(List<QueryProductDetailsParams.Product> productInAppList,
+                                            List<QueryProductDetailsParams.Product> productSubsList) {
+        if (pendingProductDetailsQueries.get() > 0) {
+            Log("Query Product Details: a query is already in progress");
+            return;
+        }
+
+        List<String> fetchedProductIds = fetchedProductInfoList.stream().map(ProductInfo::getProduct).collect(Collectors.toList());
+        if (fetchedProductIds.containsAll(allProductIds)) {
+            return;
+        }
+
+        if (!productInAppList.isEmpty()) {
+            queryProductDetails(INAPP, productInAppList);
+        }
+
+        if (!productSubsList.isEmpty()) {
+            queryProductDetails(SUBS, productSubsList);
+        }
     }
 
     /**
@@ -358,7 +434,10 @@ public class BillingConnector {
     private void queryProductDetails(String productType, List<QueryProductDetailsParams.Product> productList) {
         QueryProductDetailsParams productDetailsParams = QueryProductDetailsParams.newBuilder().setProductList(productList).build();
 
+        pendingProductDetailsQueries.incrementAndGet();
         billingClient.queryProductDetailsAsync(productDetailsParams, (billingResult, queryProductDetailsResult) -> {
+            pendingProductDetailsQueries.decrementAndGet();
+
             List<ProductDetails> productDetailsList = queryProductDetailsResult.getProductDetailsList();
             Log("Query " + productType + " billingResult=" + billingResult.getResponseCode()
                     + " fetched=" + productDetailsList.size()
@@ -375,6 +454,11 @@ public class BillingConnector {
                     Log("Query Product Details: data found");
 
                     List<ProductInfo> fetchedProductInfo = productDetailsList.stream().map(this::generateProductInfo).collect(Collectors.toList());
+
+                    //the query runs again on every reconnect, so the previous entries have to be
+                    //replaced instead of appended, otherwise the cache keeps growing with stale copies
+                    List<String> fetchedProductIds = fetchedProductInfo.stream().map(ProductInfo::getProduct).collect(Collectors.toList());
+                    fetchedProductInfoList.removeIf(it -> fetchedProductIds.contains(it.getProduct()));
                     fetchedProductInfoList.addAll(fetchedProductInfo);
 
                     switch (productType) {
@@ -385,15 +469,6 @@ public class BillingConnector {
                         default:
                             throw new IllegalStateException("Product type is not implemented");
                     }
-
-                    List<String> fetchedProductIds = fetchedProductInfo.stream().map(ProductInfo::getProduct).collect(Collectors.toList());
-                    List<String> productListIds = productList.stream().map(QueryProductDetailsParams.Product::zza).collect(Collectors.toList()); //according to the documentation "zza" is the product id
-                    boolean isFetched = fetchedProductIds.stream().anyMatch(productListIds::contains);
-
-                    if (isFetched) {
-//                        fetchPurchasedProducts();
-                    }
-
                 }
             } else {
                 Log("Query Product Details: failed");
@@ -549,6 +624,9 @@ public class BillingConnector {
             findUiHandler().post(() -> billingEventListener.onProductsPurchased(signatureValidPurchases));
         }
 
+        //purchases are re-delivered on every fetch, so the previous entries have to be replaced
+        List<String> purchasedProducts = signatureValidPurchases.stream().map(PurchaseInfo::getProduct).collect(Collectors.toList());
+        purchasedProductsList.removeIf(it -> purchasedProducts.contains(it.getProduct()));
         purchasedProductsList.addAll(signatureValidPurchases);
 
         for (PurchaseInfo purchaseInfo : signatureValidPurchases) {
@@ -667,18 +745,34 @@ public class BillingConnector {
                                     .build()
                     );
                 } else {
-                    productDetailsParamsList = ImmutableList.of(
-                            BillingFlowParams.ProductDetailsParams.newBuilder()
-                                    .setProductDetails(productDetails)
-                                    .build()
-                    );
+                    //setProductDetails() only picks up the offer token of the backwards compatible
+                    //one-time offer, so for products that use the multiple purchase options/offers
+                    //model the token of the eligible offer has to be set explicitly
+                    BillingFlowParams.ProductDetailsParams.Builder productDetailsParamsBuilder =
+                            BillingFlowParams.ProductDetailsParams.newBuilder().setProductDetails(productDetails);
+
+                    String oneTimePurchaseOfferToken = productInfo.get().getOneTimePurchaseOfferToken();
+                    if (oneTimePurchaseOfferToken != null && !oneTimePurchaseOfferToken.isEmpty()) {
+                        productDetailsParamsBuilder.setOfferToken(oneTimePurchaseOfferToken);
+                    } else {
+                        Log("Billing client launches the billing flow without an offer token because product " + productId + " has no eligible one-time offer");
+                    }
+
+                    productDetailsParamsList = ImmutableList.of(productDetailsParamsBuilder.build());
                 }
 
                 BillingFlowParams billingFlowParams = BillingFlowParams.newBuilder()
                         .setProductDetailsParamsList(productDetailsParamsList)
                         .build();
 
-                billingClient.launchBillingFlow(activity, billingFlowParams);
+                BillingResult billingResult = billingClient.launchBillingFlow(activity, billingFlowParams);
+                if (billingResult.getResponseCode() != OK) {
+                    //since Google Billing v9 a blocked Play Store app is reported as BILLING_UNAVAILABLE here
+                    Log("Billing client can not launch billing flow: " + billingResult.getResponseCode() + " " + billingResult.getDebugMessage());
+
+                    findUiHandler().post(() -> billingEventListener.onBillingError(BillingConnector.this,
+                            new BillingResponse(ErrorType.BILLING_ERROR, billingResult)));
+                }
             } else {
                 Log("Billing client can not launch billing flow because product details are missing");
             }
@@ -764,7 +858,7 @@ public class BillingConnector {
      * BillingEventListener runs on it
      */
     private Handler findUiHandler() {
-        return new Handler(Looper.getMainLooper());
+        return uiHandler;
     }
 
     /**
@@ -782,9 +876,14 @@ public class BillingConnector {
      * To avoid leaks this method should be called when BillingConnector is no longer needed
      */
     public void release() {
+        findUiHandler().removeCallbacks(reconnectRunnable);
+
         if (billingClient != null && billingClient.isReady()) {
             Log("BillingConnector instance release: ending connection...");
             billingClient.endConnection();
         }
+
+        isConnected = false;
+        isConnecting = false;
     }
 }
