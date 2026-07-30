@@ -188,7 +188,7 @@ Vì 1 request chỉ dùng 1 ad unit, các vị trí cần preload phải đượ
 
 ```kotlin
 object GroupNativeAd {
-    var listOnBoardNativeAd: MutableList<AdmNativeAd?> = mutableListOf()
+    var listOnBoardNativeAd: HashMap<Int, AdmNativeAd?> = HashMap()
 }
 
 private data class AdPreload(val id: Int, val isFullScreen: Boolean = false)
@@ -200,69 +200,46 @@ private val adPosition = mutableListOf(
     AdPreload(1),            // position 3
 )
 
-//1. tạo 1 AdmNativeAd cho mỗi position, add theo đúng thứ tự -> index trong list == position
-adPosition.forEachIndexed { position, item ->
-    val admNativeAd = AdmNativeAd(
-        id = item.id,
-        currentActivity = this,
-        isFullScreen = item.isFullScreen
-    )
 
-    admNativeAd.tag = position //để nhận biết ad
-
-    GroupNativeAd.listOnBoardNativeAd.add(admNativeAd)
-}
-
-//2. gom position theo id, mỗi group 1 loader gọi preloadAd(size) đúng 1 request
+//load ad
 adPosition.withIndex()
     .groupBy { it.value.id }
     .forEach { (id, group) ->
-        val positions = group.map { it.index }   // id=0 -> [0,1], id=1 -> [2,3]
+        val positions = group.map { it.index }        // id=0 -> [0,1], id=1 -> [2,3]
 
-        val loader = AdmNativeAd(
-            id = id,
-            currentActivity = this,
-            isFullScreen = false
-        )
+        // holder: 1 cái / position, ko load, chỉ giữ 1 NativeAd -> adapter dùng y như cũ
+        positions.forEach { position ->
+            val holder = AdmNativeAd(id, this, adPosition[position].isFullScreen)
+            holder.tag = position
+            GroupNativeAd.listOnBoardNativeAd[position] = holder
+        }
 
+        // loader: chỉ để loadAds(count)
+        val loader = AdmNativeAd(id, this, false)
         loader.tag = id
 
         loader.onPreloadAdsFinished = { ads ->
-            //rót từng ad về AdmNativeAd của position tương ứng
             positions.forEachIndexed { slot, position ->
                 GroupNativeAd.listOnBoardNativeAd[position]?.nativeAd = ads.getOrNull(slot)
             }
-
             ads.filterNotNull().forEach { ad ->
-                ad.setOnPaidEventListener { Log.d(TAG, "NativeAd ad paid: ${it.valueMicros}") }
+                ad.setOnPaidEventListener {
+                    Log.d("AdmNative", "NativeAd ad paid: ${it.valueMicros}")
+                }
             }
-
-            loader.nativeAds.clear() //nhường ad cho list, tránh destroy 2 lần
-            countLoadAd += positions.size //cả group xong -> cộng 1 phát
+            loader.nativeAds.clear()      // nhường ownership cho holder, tránh destroy 2 lần
+            runOnUiThread { countLoadAd += positions.size }
         }
 
-        loader.preloadAd(positions.size) //loadAds(request, size)
+        loader.preloadAd(positions.size)
     }
-
-    object GroupNativeAd {
-    var listOnBoardNativeAd: MutableList<AdmNativeAd?> = mutableListOf()
-}
-
-val admNativeAd = AdmNativeAd(
-    id = 0,
-    context = applicationContext,
-    isFullScreen = false // true
-)
-
-admNativeAd.tag = 0 //để nhận biết ad
-
-GroupNativeAd.listOnBoardNativeAd.add(admNativeAd)
 
 //populateNativeAdView
 val nativeAd = GroupNativeAd.listOnBoardNativeAd[position]
+nativeAd?.setNewActivity(currentActivity)
 nativeAd?.populateNativeAdView(
-    adContainerView = adContainer,
-    layoutNativeAdView = R.layout.layout_native_ad_full
+    adContainer,
+    R.layout.layout_native_ad
 )
 ```
 
