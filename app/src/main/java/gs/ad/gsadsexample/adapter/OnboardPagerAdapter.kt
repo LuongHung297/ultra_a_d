@@ -73,6 +73,9 @@ class OnboardPagerAdapter(
             imageView.setImageResource(imageResId)
 
             if (!PreferencesManager.getInstance().isSUB()) {
+                GroupNativeAd.listOnBoardNativeAd[position]?.let { holder ->
+                    Log.d("AdmNative", "pos=$position headline=${holder.nativeAd?.headline}")
+                }
                 val nativeAd = GroupNativeAd.listOnBoardNativeAd[position]
                 nativeAd?.setNewActivity(currentActivity)
                 nativeAd?.populateNativeAdView(
@@ -127,6 +130,9 @@ class OnboardPagerAdapter(
         private val currentActivity = activity
         fun bind(position: Int) {
             if (!PreferencesManager.getInstance().isSUB()) {
+                GroupNativeAd.listOnBoardNativeAd[position]?.let { holder ->
+                    Log.d("AdmNative", "pos=$position headline=${holder.nativeAd?.headline}")
+                }
                 val nativeAd = GroupNativeAd.listOnBoardNativeAd[position]
                 nativeAd?.setNewActivity(currentActivity)
                 nativeAd?.populateNativeAdView(

@@ -153,31 +153,37 @@ class SplashActivity : AppCompatActivity() {
             var countProgress = 0
             totalLoadAd = adPosition.count()
             binding.splashProcessBar.max = maxProgress
+            adPosition.withIndex()
+                .groupBy { it.value.id }
+                .forEach { (id, group) ->
+                    val positions = group.map { it.index }        // id=0 -> [0,1], id=1 -> [2,3]
 
-            adPosition.forEachIndexed { index, it ->
-                val admNativeAd = AdmNativeAd(
-                    it.id,
-                    this,
-                    it.isFullScreen
-                )
-
-                admNativeAd.tag = index
-
-                GroupNativeAd.listOnBoardNativeAd[index] = admNativeAd
-                admNativeAd.preloadAd()
-                admNativeAd.onAdLoaded = {
-                    countLoadAd += 1
-                    it?.setOnPaidEventListener {
-                        Log.d(TAG, "NativeAd ad paid: ${it.valueMicros}")
+                    // holder: 1 cái / position, ko load, chỉ giữ 1 NativeAd -> adapter dùng y như cũ
+                    positions.forEach { position ->
+                        val holder = AdmNativeAd(id, this, adPosition[position].isFullScreen)
+                        holder.tag = position
+                        GroupNativeAd.listOnBoardNativeAd[position] = holder
                     }
-                }
 
-                admNativeAd.onAdFailToLoaded = { admErrorType, errorMessage, tag ->
-                    runOnUiThread {
-                        countLoadAd += 1
+                    // loader: chỉ để loadAds(count)
+                    val loader = AdmNativeAd(id, this, false)
+                    loader.tag = id
+
+                    loader.onPreloadAdsFinished = { ads ->
+                        positions.forEachIndexed { slot, position ->
+                            GroupNativeAd.listOnBoardNativeAd[position]?.nativeAd = ads.getOrNull(slot)
+                        }
+                        ads.filterNotNull().forEach { ad ->
+                            ad.setOnPaidEventListener {
+                                Log.d("AdmNative", "NativeAd ad paid: ${it.valueMicros}")
+                            }
+                        }
+                        loader.nativeAds.clear()      // nhường ownership cho holder, tránh destroy 2 lần
+                        runOnUiThread { countLoadAd += positions.size }
                     }
+
+                    loader.preloadAd(positions.size)
                 }
-            }
 
             lifecycleScope.launch(Dispatchers.Main) {
                 val progressJob = async {

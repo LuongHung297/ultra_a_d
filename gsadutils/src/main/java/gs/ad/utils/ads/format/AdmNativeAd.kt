@@ -120,6 +120,7 @@ class AdmNativeAd(
             return
         }
         isLoadingAd = true
+        isMultiLoad = false
         Log.d(TAG, "id: $id")
         val adUnitId = getAdUnitId()
 
@@ -148,6 +149,87 @@ class AdmNativeAd(
         builder.withNativeAdOptions(adOptionsBuild)
         val adLoader = builder.withAdListener(this).build()
         adLoader.loadAd(AdRequest.Builder().build())
+    }
+    val nativeAds = mutableListOf<NativeAd?>()
+    private var adLoaderRef: AdLoader? = null
+    private var expectedAdCount = 0
+    private var isMultiLoad = false
+
+    /** Chỉ bắn 1 lần khi cả batch preloadAd(size) đã xong. Slot không fill được = null. */
+    var onPreloadAdsFinished: ((List<NativeAd?>) -> Unit)? = null
+
+    fun preloadAd(size : Int) {
+        if (size > 5) {
+            onAdFailToLoaded?.invoke(AdmErrorType.OTHER, null, tag)
+            Log.e(TAG,"id size max is 5")
+            onPreloadAdsFinished?.invoke(List(size) { null })
+            return
+        }
+
+        if (nativeAds.size >= size) {
+            onAdFailToLoaded?.invoke(AdmErrorType.AD_IS_EXISTED, null, tag)
+            onPreloadAdsFinished?.invoke(nativeAds.toList())
+            return
+        }
+
+        val error = when {
+            AdmConfigAdId.listNativeAdUnitID.isEmpty() -> AdmErrorType.LIST_AD_ID_IS_EMPTY
+            id >= AdmConfigAdId.listNativeAdUnitID.count() -> AdmErrorType.AD_ID_IS_NOT_EXIST
+            !NetworkUtil.isNetworkAvailable(currentActivity) -> AdmErrorType.NETWORK_IS_NOT_AVAILABLE
+            PreferencesManager.getInstance().isSUB() -> AdmErrorType.CLIENT_HAVE_SUB
+            PreferencesManager.getInstance().isRemoveAds() -> AdmErrorType.CLIENT_HAVE_BEEN_REMOVED_AD
+            !googleMobileAdsConsentManager.canRequestAds -> AdmErrorType.UMP_IS_NOT_ACTIVE
+            isLoadingAd -> AdmErrorType.AD_IS_LOADING
+            else -> null
+        }
+
+        if (error != null) {
+            onAdFailToLoaded?.invoke(error, null, tag)
+            onPreloadAdsFinished?.invoke(List(size) { null })
+            return
+        }
+
+        isLoadingAd = true
+        isMultiLoad = true
+        expectedAdCount = size
+        nativeAds.clear()
+        Log.d(TAG, "id: $id")
+        val adUnitId = getAdUnitId()
+
+        val builder = AdLoader.Builder(currentActivity, adUnitId)
+
+        builder.forNativeAd { ad ->
+            if (isDestroyed) { ad.destroy(); return@forNativeAd }
+            nativeAds.add(ad)          // gom vào list, ko đè
+        }
+
+        val adOptions = NativeAdOptions.Builder()
+            .setAdChoicesPlacement(nativeAdOptions)
+
+        val videoOptions = VideoOptions.Builder().setStartMuted(isMutedVideo).build()
+        adOptions.setVideoOptions(videoOptions)
+
+        if (isFullScreen) {
+            adOptions.setMediaAspectRatio(mediaAspectRatio)
+        }
+
+        val adOptionsBuild = adOptions.build()
+        builder.withNativeAdOptions(adOptionsBuild)
+        val adLoader = builder.withAdListener(this).build()
+        adLoaderRef = adLoader
+        adLoader.loadAds(AdRequest.Builder().build(),size)
+    }
+
+    /**
+     * loadAds() bắn onAdLoaded()/onAdFailedToLoad() cho TỪNG ad, không phải 1 lần.
+     * isLoading chỉ false sau callback cuối -> dùng nó để biết cả batch đã xong.
+     */
+    private fun finishMultiLoadIfDone() {
+        if (adLoaderRef?.isLoading != false) return
+        isLoadingAd = false
+        isMultiLoad = false                                // instance dùng lại cho preloadAd() single được
+        while (nativeAds.size < expectedAdCount) nativeAds.add(null)
+        onPreloadAdsFinished?.invoke(nativeAds.toList())   // snapshot: caller clear list gốc ko ảnh hưởng
     }
 
     fun loadAd(adContainerView: ConstraintLayout, layoutNativeAdView: Int) {
@@ -426,6 +508,8 @@ class AdmNativeAd(
         isDestroyed = true
         nativeAd?.destroy()
         nativeAd = null
+        nativeAds.forEach { it?.destroy() }
+        nativeAds.clear()
     }
 
     override fun onAdOpened() {
@@ -448,6 +532,10 @@ class AdmNativeAd(
     override fun onAdLoaded() {
         super.onAdLoaded()
         Log.d(TAG, "native ads onAdLoaded: $nameActivity")
+        if (isMultiLoad) {
+            finishMultiLoadIfDone()
+            return
+        }
         isLoadingAd = false
         onAdLoaded?.invoke(nativeAd)
     }
@@ -455,8 +543,12 @@ class AdmNativeAd(
     override fun onAdFailedToLoad(p0: LoadAdError) {
         super.onAdFailedToLoad(p0)
         Log.d(TAG, "native ads onAdFailedToLoad: $nameActivity " + p0.message)
-        isLoadingAd = false
         onAdFailToLoaded?.invoke(AdmErrorType.OTHER, p0.message, tag)
+        if (isMultiLoad) {
+            finishMultiLoadIfDone()
+            return
+        }
+        isLoadingAd = false
     }
 
     companion object {

@@ -47,7 +47,7 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
 
-    implementation ("com.google.android.gms:play-services-ads:25.2.0")
+    implementation ("com.google.android.gms:play-services-ads:25.4.0")
     implementation ("com.google.android.ump:user-messaging-platform:4.0.0")
 
     //lifecycle + multidex

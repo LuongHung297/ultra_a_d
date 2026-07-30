@@ -149,6 +149,97 @@ nativeAd?.populateNativeAdView(
 )
 ```
 
+#### Preload nhiều ad bằng 1 request — `preloadAd(size)`
+
+`preloadAd(size)` gọi `AdLoader.loadAds()`: **1 request lấy nhiều ad** (tối đa 5) từ **cùng 1 ad unit id**. Ad nhận được nằm trong `nativeAds`, và `onPreloadAdsFinished` bắn **đúng 1 lần** khi cả lô xong — slot nào ko fill được thì là `null`.
+
+Vì 1 request chỉ dùng 1 ad unit, các vị trí cần preload phải được **gom theo `id`**: mỗi group 1 loader, ad về thì rót lại cho từng `AdmNativeAd` trong list theo position.
+
+```kotlin
+object GroupNativeAd {
+    var listOnBoardNativeAd: MutableList<AdmNativeAd?> = mutableListOf()
+}
+
+private data class AdPreload(val id: Int, val isFullScreen: Boolean = false)
+
+private val adPosition = mutableListOf(
+    AdPreload(0),            // position 0
+    AdPreload(0),            // position 1
+    AdPreload(1, true),      // position 2
+    AdPreload(1),            // position 3
+)
+
+//1. tạo 1 AdmNativeAd cho mỗi position, add theo đúng thứ tự -> index trong list == position
+adPosition.forEachIndexed { position, item ->
+    val admNativeAd = AdmNativeAd(
+        id = item.id,
+        currentActivity = this,
+        isFullScreen = item.isFullScreen
+    )
+
+    admNativeAd.tag = position //để nhận biết ad
+
+    GroupNativeAd.listOnBoardNativeAd.add(admNativeAd)
+}
+
+//2. gom position theo id, mỗi group 1 loader gọi preloadAd(size) đúng 1 request
+adPosition.withIndex()
+    .groupBy { it.value.id }
+    .forEach { (id, group) ->
+        val positions = group.map { it.index }   // id=0 -> [0,1], id=1 -> [2,3]
+
+        val loader = AdmNativeAd(
+            id = id,
+            currentActivity = this,
+            isFullScreen = false
+        )
+
+        loader.tag = id
+
+        loader.onPreloadAdsFinished = { ads ->
+            //rót từng ad về AdmNativeAd của position tương ứng
+            positions.forEachIndexed { slot, position ->
+                GroupNativeAd.listOnBoardNativeAd[position]?.nativeAd = ads.getOrNull(slot)
+            }
+
+            ads.filterNotNull().forEach { ad ->
+                ad.setOnPaidEventListener { Log.d(TAG, "NativeAd ad paid: ${it.valueMicros}") }
+            }
+
+            loader.nativeAds.clear() //nhường ad cho list, tránh destroy 2 lần
+            countLoadAd += positions.size //cả group xong -> cộng 1 phát
+        }
+
+        loader.preloadAd(positions.size) //loadAds(request, size)
+    }
+```
+
+`populateNativeAdView` dùng y như preload thường, chỉ cần xử lý thêm slot `null` (ad ko fill được):
+
+```kotlin
+val nativeAd = GroupNativeAd.listOnBoardNativeAd[position]
+if (nativeAd?.nativeAd == null) {
+    adContainer.visibility = View.GONE
+} else {
+    adContainer.visibility = View.VISIBLE
+    nativeAd.setNewActivity(currentActivity)
+    nativeAd.populateNativeAdView(
+        adContainerView = adContainer,
+        layoutNativeAdView = R.layout.layout_native_ad_full
+    )
+}
+```
+
+Destroy: mỗi phần tử trong list giữ 1 ad riêng nên loop `destroyNativeAd()` như phần Destroy Ad bên dưới là đủ.
+
+Lưu ý:
+- `size > 5` bị chặn, `onPreloadAdsFinished` trả về list toàn `null`.
+- Mọi lỗi guard (chưa có network, đã SUB, đã remove ads, UMP chưa xong, đang load...) đều bắn `onAdFailToLoaded` **và** `onPreloadAdsFinished(List(size){null})` — nên counter phía app ko bị treo.
+- `loadAds()` chậm hơn `loadAd()` vì chờ server trả cả lô (thực đo ~4–5s). Progress bar splash phải chịu được.
+- `isFullScreen` chỉ có tác dụng lúc build request (`setMediaAspectRatio`). 1 request = 1 aspect ratio, nên trong cùng group mà trộn full-screen với ko full-screen thì phải chọn 1, hoặc gom group theo `(id, isFullScreen)`.
+- `onAdShow`/`onAdClicked`/`onAdImpression` do AdListener của **loader** bắn (`tag` = tag của loader), holder ko nhận được — muốn tracking theo từng position thì tự map.
+- Test ad unit native video `ca-app-pub-3940256099942544/1044960115` hay trả `Invalid template ID: -1` thất thường, ko phải lỗi code.
+
 Listener
 ```kotlin
 nativeAd?.onAdFailToLoaded = { admErrorType, errorMessage ->
