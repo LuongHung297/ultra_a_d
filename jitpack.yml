@@ -1,5 +1,4 @@
 jdk:
-  - openjdk17
-before-install:
-  - sdk install java 17.0.7-open
-  - sdk use java 17.0.7-open
+  - openjdk21
+install:
+  - ./gradlew :GoogleAdCompose:publishToMavenLocal
