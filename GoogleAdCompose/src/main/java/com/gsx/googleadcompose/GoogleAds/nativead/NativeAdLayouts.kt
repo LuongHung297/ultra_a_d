@@ -26,18 +26,24 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -46,6 +52,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.graphics.drawable.toBitmap
 import com.google.android.libraries.ads.mobile.sdk.nativead.NativeAd
 import com.gsx.googleadcompose.GoogleAds.ShimmerBox
+import kotlinx.coroutines.delay
 
 /**
  * Layout native dựng sẵn (Compose). Mỗi layout = 1 hàm render asset qua [NativeAdView] wrapper.
@@ -61,7 +68,7 @@ enum class NativeLayout {
     /** Native nhỏ: content trái (icon + text), nút install full-height bên phải. */
     SMALL_2,
 
-    /** Media + hàng SMALL_2, mũi tên góc trên trái; ấn -> ẩn CẢ ad luôn (không mở lại). */
+    /** Media + hàng SMALL_2, mũi tên góc trên trái; ấn -> ẩn CẢ ad luôn (mặc định không mở lại). */
     COLLAPSIBLE,
 
     /** Full-screen: media nền, Title/Body overlay trên, card trắng (icon + Install) đáy. */
@@ -115,6 +122,9 @@ internal fun NativeLayoutRender(
             ctaTextColor = c.ctaTextColor,
             textColor = c.textColor,
             subTextColor = c.subTextColor,
+            collapseDelaySeconds = c.collapseDelaySeconds,
+            collapseReshowSeconds = c.collapseReshowSeconds,
+            collapseRingColor = c.collapseRingColor,
         )
 
         NativeLayout.FULL -> NativeAdFullLayout(
@@ -448,7 +458,11 @@ fun NativeAdSmall2Layout(
 
 /**
  * Layout COLLAPSIBLE — media + hàng [NativeAdSmall2Layout]. Mũi tên xuống góc trên trái đè media;
- * ấn -> ẩn CẢ ad luôn (render rỗng, không mở lại). Mũi tên KHÔNG bọc wrapper -> không tính click ad.
+ * ấn -> ẩn CẢ ad luôn (render rỗng, mặc định không mở lại). Mũi tên KHÔNG bọc wrapper -> không tính click ad.
+ *
+ * [collapseDelaySeconds] > 0: trong N giây đầu mũi tên mờ + vòng tròn chạy quanh nút, đủ vòng mới ấn được.
+ * [collapseReshowSeconds] > 0: ấn mũi tên xong, sau N giây ad tự hiện lại (0 = ẩn hẳn).
+ * [collapseRingColor]: màu vòng tròn chạy quanh nút lúc chờ.
  */
 @Composable
 fun NativeAdCollapsibleLayout(
@@ -459,9 +473,34 @@ fun NativeAdCollapsibleLayout(
     ctaTextColor: Color = Color(0xFF062100),
     textColor: Color = Color.White,
     subTextColor: Color = Color(0xFFB9AED0),
+    collapseDelaySeconds: Int = 0,
+    collapseReshowSeconds: Int = 0,
+    collapseRingColor: Color = Color.White,
 ) {
     var closed by remember { mutableStateOf(false) }
-    if (closed) return                                  // đã ấn mũi tên -> ẩn cả ad
+    if (closed) {                                       // đã ấn mũi tên -> ẩn cả ad
+        // Hẹn hiện lại CÙNG ad đó sau N giây; hiện lại thì [collapseDelaySeconds] đếm lại từ đầu.
+        if (collapseReshowSeconds > 0) {
+            LaunchedEffect(collapseReshowSeconds) {
+                delay(collapseReshowSeconds * 1000L)
+                closed = false
+            }
+        }
+        return
+    }
+
+    // Đếm 0f -> 1f trong [collapseDelaySeconds] giây kể từ lúc ad hiện. Tính theo frame time thật
+    // (không dùng tween) -> tắt animation trong Developer options cũng KHÔNG bỏ qua được delay.
+    var closeProgress by remember { mutableFloatStateOf(if (collapseDelaySeconds > 0) 0f else 1f) }
+    LaunchedEffect(collapseDelaySeconds) {
+        val totalNanos = collapseDelaySeconds * 1_000_000_000L
+        if (totalNanos <= 0L) { closeProgress = 1f; return@LaunchedEffect }
+        closeProgress = 0f
+        val start = withFrameNanos { it }
+        while (closeProgress < 1f) {
+            closeProgress = withFrameNanos { ((it - start).toFloat() / totalNanos).coerceAtMost(1f) }
+        }
+    }
 
     NativeAdView(ad, modifier) {
         Column(
@@ -495,9 +534,11 @@ fun NativeAdCollapsibleLayout(
                 }
                 ChevronToggle(
                     expanded = false,
-                    tint = Color(0xFF3A3A3A),
-                    background = Color(0xFFF1EEFB),
+                    tint = Color.White,
+                    background = Color(0xFF585858).copy(alpha = 0.7f),   // nền tối như nút X của FULL/PiP -> vòng sáng nhìn rõ
                     modifier = Modifier.align(Alignment.TopStart).padding(6.dp),
+                    ringColor = collapseRingColor,
+                    progress = { closeProgress },
                 ) { closed = true }
             }
 
@@ -582,13 +623,20 @@ fun NativeAdCollapsibleLayout(
     }
 }
 
-/** Mũi tên chevron (kiểu nút collapse của banner): vẽ Canvas, xoay 180° khi mở. */
+/**
+ * Mũi tên chevron (kiểu nút collapse của banner): vẽ Canvas, xoay 180° khi mở.
+ *
+ * [progress] 0f..1f = tiến độ chờ: < 1f thì mũi tên mờ + vòng cung chạy quanh nút, CHƯA gọi [onClick];
+ * đủ 1f mới ấn được. Đọc trong draw/click (lambda) -> chạy mỗi frame mà không recompose.
+ */
 @Composable
 private fun ChevronToggle(
     expanded: Boolean,
     tint: Color,
     modifier: Modifier = Modifier,
     background: Color = Color.White.copy(alpha = 0.12f),
+    ringColor: Color = tint,
+    progress: () -> Float = { 1f },
     onClick: () -> Unit,
 ) {
     Box(
@@ -596,7 +644,23 @@ private fun ChevronToggle(
             .size(28.dp)
             .clip(CircleShape)
             .background(background)
-            .clickable(onClick = onClick)
+            .drawBehind {
+                val p = progress()
+                if (p < 1f) {
+                    val sw = 2.dp.toPx()
+                    drawArc(
+                        color = ringColor,
+                        startAngle = -90f,
+                        sweepAngle = 360f * p,
+                        useCenter = false,
+                        topLeft = Offset(sw / 2, sw / 2),
+                        size = Size(size.width - sw, size.height - sw),
+                        style = Stroke(sw, cap = StrokeCap.Round),
+                    )
+                }
+            }
+            // Luôn clickable (kể cả lúc chờ) để NUỐT tap -> không lọt xuống media bên dưới thành click ad.
+            .clickable { if (progress() >= 1f) onClick() }
             .padding(7.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -606,16 +670,17 @@ private fun ChevronToggle(
             val w = size.width
             val h = size.height
             val sw = 1.8.dp.toPx()
+            val color = if (progress() < 1f) tint.copy(alpha = 0.35f) else tint
             // chữ "v": 2 nét từ 2 mép trên xuống giữa dưới
             drawLine(
-                tint,
+                color,
                 Offset(w * 0.18f, h * 0.35f),
                 Offset(w * 0.5f, h * 0.68f),
                 sw,
                 StrokeCap.Round
             )
             drawLine(
-                tint,
+                color,
                 Offset(w * 0.82f, h * 0.35f),
                 Offset(w * 0.5f, h * 0.68f),
                 sw,

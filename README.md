@@ -183,7 +183,19 @@ Hook: `onShowed` / `onDismissed` / `onClicked` / `onImpression` / `onPaid(AdValu
 
 `NativeAdLoader.load` → render asset qua `NativeAdView` wrapper. Layout dựng sẵn: `NativeLayout.NORMAL`, `SMALL`, `SMALL_2`, `COLLAPSIBLE`, `FULL`.
 
-`COLLAPSIBLE`: media + hàng icon/nút, mũi tên góc trên trái — ấn → ẩn **cả ad** luôn (không mở lại).
+`COLLAPSIBLE`: media + hàng icon/nút, mũi tên góc trên trái — ấn → ẩn **cả ad** luôn (mặc định không mở lại).
+
+```kotlin
+AdmNative(layout = NativeLayout.COLLAPSIBLE, index = -1) {
+    collapseDelaySeconds = 3    // 3 giây đầu mũi tên mờ + vòng tròn chạy quanh nút, đủ vòng mới ấn được
+    collapseReshowSeconds = 30  // ấn mũi tên xong, 30 giây sau ad tự hiện lại (cùng ad đó)
+    collapseRingColor = Color.White   // màu vòng tròn chạy quanh nút (mặc định trắng)
+}
+```
+
+`collapseDelaySeconds` mặc định `0` (ấn được ngay). Đếm từ lúc ad hiện; dùng được cả với `AdmNativeSequence`.
+
+`collapseReshowSeconds` mặc định `0` (ẩn hẳn). Hiện lại là **cùng ad cũ**, không load mới; `collapseDelaySeconds` đếm lại từ đầu.
 
 ### 4.1 Tự load (đơn giản nhất)
 

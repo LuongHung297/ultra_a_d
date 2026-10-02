@@ -134,6 +134,9 @@ private fun IntroPage(p: OnbPage.Intro, active: Boolean) {
             textAlign = TextAlign.Center,
             modifier = Modifier.padding(top = 16.dp),
         )
-        AdmNativeSequence(layout = NativeLayout.COLLAPSIBLE, modifier = Modifier.fillMaxWidth(), active = active) {  }
+        AdmNativeSequence(layout = NativeLayout.COLLAPSIBLE, modifier = Modifier.fillMaxWidth(), active = active) {
+            collapseDelaySeconds = 5
+            collapseReshowSeconds = 10
+        }
     }
 }

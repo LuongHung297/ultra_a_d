@@ -61,6 +61,21 @@ class AdmNativeAd internal constructor() : NativeAdEventCallback {
     /** Màu chữ phụ (body/store/rating). */
     var subTextColor: Color = Color(0xFFB9AED0)
 
+    /**
+     * [NativeLayout.COLLAPSIBLE]: số giây đầu (tính từ lúc ad hiện) mũi tên đóng CHƯA bấm được — vòng
+     * tròn quanh nút chạy đủ 1 vòng thì mới ấn được. `0` (mặc định) = bấm được ngay.
+     */
+    var collapseDelaySeconds: Int = 0
+
+    /**
+     * [NativeLayout.COLLAPSIBLE]: ấn mũi tên đóng xong, sau số giây này ad tự HIỆN LẠI (cùng ad đó,
+     * không load mới). `0` (mặc định) = ẩn hẳn, không hiện lại.
+     */
+    var collapseReshowSeconds: Int = 0
+
+    /** [NativeLayout.COLLAPSIBLE]: màu vòng tròn chạy quanh mũi tên trong lúc chờ [collapseDelaySeconds]. */
+    var collapseRingColor: Color = Color.White
+
     /** Kênh báo lỗi (xem [AdmErrorType]). */
     var onError: (AdmErrorType) -> Unit = {}
 
